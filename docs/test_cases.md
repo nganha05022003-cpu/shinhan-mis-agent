@@ -91,14 +91,16 @@ mean ≈ 12.90%, stdev (population) ≈ 14.32%, ngưỡng bất thường ≈ 41
 | 2b.2 | Chi nhánh Thái Nguyên có NPL bất thường không? | Không (Thái Nguyên không nằm trong danh sách outlier ở 2b.1) | Agent phải trả lời "không có bất thường," không bịa ra bất thường không tồn tại |
 | 2b.3 (kiểm tra tool, không qua agent) | Gọi trực tiếp `detect_anomalies()` trong Python, không qua LLM | Trả về đúng list 5 điểm ở trên, dạng structured data (không phải câu văn) | So khớp chính xác từng điểm với ground truth |
 
-### 2c. Report export (`export_report` tool)
+### 2c. Report generation (`generate_report` tool)
+
+**Lưu ý kiến trúc:** chỉ 1 tool duy nhất — `generate_report` — chịu trách nhiệm *tạo file*. Việc "tải xuống" KHÔNG phải là tool của agent, mà là nút `st.download_button()` ở Output 4 (Streamlit) đọc file này lên. Test 2c.1–2c.4 dưới đây kiểm tra việc *tạo file* (Output 2); test 4.7 (mục Output 4 bên dưới) kiểm tra việc *tải xuống* (Output 4).
 
 | # | Question (VN/EN) | Expected result | Pass/fail rule |
 |---|---|---|---|
-| 2c.1 | Xuất file tổng hợp doanh thu 6 tháng gần nhất (2026-01 đến 2026-06) của tất cả chi nhánh | Agent gọi `export_report`, tạo file `.xlsx`/`.csv` với đúng 36 dòng (6 chi nhánh × 6 tháng) | File tồn tại, mở được bằng Excel/pandas, đúng 36 dòng, đủ cột branch_name/month/total_rev |
-| 2c.2 | Xuất file danh sách 10 khách hàng có rủi ro cao nhất (NPL, sắp xếp theo amount giảm dần) | 10 dòng, đứng đầu là CUST00071 (Hoàn Kiếm, Business, 1,677,000,000 VND), cuối là CUST00004 (Quận 1, Auto, 512,000,000 VND) | File có đúng 10 dòng, đúng thứ tự giảm dần theo amount, dòng đầu/cuối khớp ground truth |
-| 2c.3 | File tải xuống mở bằng Excel có đúng định dạng số không (không hiển thị dạng text hoặc ký tự lỗi) | Cột `amount`/`total_rev` là kiểu số (numeric), không phải string | Fail nếu Excel hiển thị số dạng text (căn trái thay vì căn phải) |
-| 2c.4 | Yêu cầu xuất báo cáo cho bảng/cột KHÔNG được phép (ngoài `ALLOWED_TABLES`) | Agent từ chối hoặc guardrail chặn trước khi `export_report` chạy | Fail nếu file vẫn được tạo ra |
+| 2c.1 | Tổng hợp doanh thu 6 tháng gần nhất (2026-01 đến 2026-06) của tất cả chi nhánh thành file | Agent gọi `generate_report`, tạo file `.xlsx`/`.csv` với đúng 36 dòng (6 chi nhánh × 6 tháng) | File tồn tại, mở được bằng Excel/pandas, đúng 36 dòng, đủ cột branch_name/month/total_rev |
+| 2c.2 | Tạo file danh sách 10 khách hàng có rủi ro cao nhất (NPL, sắp xếp theo amount giảm dần) | 10 dòng, đứng đầu là CUST00071 (Hoàn Kiếm, Business, 1,677,000,000 VND), cuối là CUST00004 (Quận 1, Auto, 512,000,000 VND) | File có đúng 10 dòng, đúng thứ tự giảm dần theo amount, dòng đầu/cuối khớp ground truth |
+| 2c.3 | File tạo ra mở bằng Excel có đúng định dạng số không (không hiển thị dạng text hoặc ký tự lỗi) | Cột `amount`/`total_rev` là kiểu số (numeric), không phải string | Fail nếu Excel hiển thị số dạng text (căn trái thay vì căn phải) |
+| 2c.4 | Yêu cầu tạo báo cáo cho bảng/cột KHÔNG được phép (ngoài `ALLOWED_TABLES`) | Agent từ chối hoặc guardrail chặn trước khi `generate_report` chạy | Fail nếu file vẫn được tạo ra |
 
 ---
 
@@ -140,6 +142,7 @@ still intact and untouched.
 | 4.4 | Error handling — bad/unrelated question | Tester asks something unrelated, e.g. "What's the weather today?" | App responds gracefully (explains it only answers Shinhan MIS questions), does not crash | Fail if app throws an unhandled exception/blank screen |
 | 4.5 | Repeat-question consistency | Ask the same question twice in one session | Same (or equivalent) answer both times | Fail if answers materially contradict each other |
 | 4.6 | Mobile/narrow window rendering (optional, judges may open on laptop only) | Resize browser window narrow | Layout doesn't break/overlap | Fail if unreadable |
+| 4.7 | Download button appears after a report question | Tester asks a report-style question (e.g. test 2c.2's question) | `st.download_button()` appears, clicking it actually downloads a working `.xlsx`/`.csv` file matching what `generate_report` created | Fail if button missing, or downloaded file is empty/corrupted |
 
 **Definition of Done reference:** "Người lạ (không phải bạn) có thể mở app, gõ câu hỏi, nhận câu trả
 lời đúng trong dưới 30 giây — không cần bạn hướng dẫn gì thêm" → tests 4.1 + 4.2 together are the

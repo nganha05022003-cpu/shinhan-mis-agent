@@ -33,17 +33,19 @@
 
 > Definition of Done: Hỏi "chi nhánh/tháng nào có NPL bất thường?" → agent gọi `detect_anomalies`, trả về đúng (các) chi nhánh/tháng thực sự lệch >2 stdev (verify bằng cách tự tính tay/Python trước), không bỏ sót, không báo sai chi nhánh bình thường thành bất thường.
 
-### 2c. Report export — tải xuống file Excel/CSV (làm rõ lại 3/7, sau phản hồi user)
+### 2c. Report generation — file Excel/CSV (làm rõ lại 3/7, sau thảo luận thiết kế với user)
 
-**Khác với trả lời text thường (đã có sẵn nhờ SQL GROUP BY/ORDER BY/SUM/AVG — xem test 2.17-2.19), đây là 1 tính năng riêng: xuất ra 1 file thật để tải xuống**, không chỉ hiển thị trong khung chat.
+**Khác với trả lời text thường (đã có sẵn nhờ SQL GROUP BY/ORDER BY/SUM/AVG — xem test 2.17-2.19), đây là 1 tính năng riêng: tạo ra 1 file thật**, không chỉ hiển thị trong khung chat.
 
-**Thiết kế:** thêm tool thứ 4 tên `export_report` — nhận `sql` + `filename`, chạy query, dùng `pandas` ghi kết quả ra file `.xlsx` (hoặc `.csv`) vào `outputs/reports/`, trả về đường dẫn file cho model xác nhận. Streamlit (Output 4) đọc file này và hiển thị nút `st.download_button()` để manager tải về.
+**Thiết kế (đã chốt sau thảo luận 3/7):** chỉ có **1 tool** tên `generate_report` — nhận `sql` + `filename`, chạy query, dùng `pandas` ghi kết quả ra file `.xlsx` (hoặc `.csv`) vào `outputs/reports/`, trả về đường dẫn file cho model xác nhận. Đây là tool thứ 4 và cũng là tool cuối cùng của agent (cùng với `query_database`, `generate_chart`, `detect_anomalies`).
+
+**Quan trọng — không có tool `export_report` riêng:** "tải xuống file" không phải là hành động model cần quyết định (giống việc user bấm xem chart PNG) — model chỉ *tạo* file, còn *tải xuống* là hành động của user trên giao diện, không phải của model. Vì vậy việc "export/tải xuống" thuộc về Output 4 (Streamlit dùng `st.download_button()` đọc file mà `generate_report` đã tạo sẵn), không phải 1 tool trong `TOOLS` list của agent.py.
 
 **Phạm vi đã chốt (theo lựa chọn của user 3/7):** file Excel/CSV đơn giản — 1 sheet, có header, không cần formatting màu sắc hay nhiều sheet. Không làm dashboard tương tác kiểu Power BI (quá lớn so với 9 ngày còn lại) — nếu muốn dashboard thật sự, đây nên là 1 project/giai đoạn riêng sau buildathon.
 
-**Ví dụ use case:** "Xuất file danh sách 10 khách hàng có rủi ro cao nhất" → agent viết SQL lọc `loans` theo `repayment_status='NPL'` sắp xếp theo `amount` giảm dần LIMIT 10, gọi `export_report`, trả lời kèm đường dẫn/nút tải file.
+**Ví dụ use case:** "Xuất file danh sách 10 khách hàng có rủi ro cao nhất" → agent viết SQL lọc `loans` theo `repayment_status='NPL'` sắp xếp theo `amount` giảm dần LIMIT 10, gọi `generate_report`, trả lời kèm đường dẫn file → Streamlit hiển thị nút tải xuống.
 
-> Definition of Done: Yêu cầu 1 báo cáo cụ thể (VD "tổng hợp doanh thu 6 tháng gần nhất," "top 10 khách hàng rủi ro cao") → agent tạo đúng 1 file Excel/CSV mở được, dữ liệu khớp với SQL, không lỗi, không thiếu dòng.
+> Definition of Done: Yêu cầu 1 báo cáo cụ thể (VD "tổng hợp doanh thu 6 tháng gần nhất," "top 10 khách hàng rủi ro cao") → agent tạo đúng 1 file Excel/CSV mở được, dữ liệu khớp với SQL, không lỗi, không thiếu dòng; Streamlit hiển thị được nút tải file đó.
 
 **⚠️ Rủi ro thời gian:** 3 mục mở rộng trên (đặc biệt 2a và 2b) là phạm vi thêm ngoài kế hoạch gốc, trong khi deadline chỉ còn 9 ngày (đến 12/7). Nếu đến ngày 8/7 mà Output 2 gốc (function calling cơ bản) chưa chạy ổn định qua 10/10 câu hỏi demo, nên **tạm dừng 2a/2b**, ưu tiên hoàn thiện Output 3 và 4 trước — vì Definition of Done gốc của Output 2 vẫn là điều kiện bắt buộc, còn chart/anomaly là điểm cộng, không phải bắt buộc để nộp bài.
 
@@ -57,6 +59,7 @@
 
 - [ ] 1 app Streamlit (`app.py`) — ô chat, hiển thị câu trả lời, sidebar gợi ý câu hỏi mẫu.
 - [ ] Nếu 2a (chart) hoàn thành: hiển thị được file PNG chart trả về từ agent bằng `st.image()`.
+- [ ] Nếu 2c (report) hoàn thành: hiển thị nút tải xuống bằng `st.download_button()` đọc file mà `generate_report` đã tạo.
 
 > Definition of Done: Người lạ (không phải bạn) có thể mở app, gõ câu hỏi, nhận câu trả lời đúng trong dưới 30 giây — không cần bạn hướng dẫn gì thêm. Xem `docs/test_cases.md` mục Output 4.
 

@@ -70,6 +70,38 @@ before the 11/7 build day.
 
 ---
 
+## Output 2 (mở rộng) — Chart, Anomaly Detection, Report Export
+
+### 2a. Chart generation (`generate_chart` tool)
+
+| # | Question (VN/EN) | Expected result | Pass/fail rule |
+|---|---|---|---|
+| 2a.1 | Vẽ biểu đồ doanh thu 12 tháng của Chi nhánh Quận 1 | Agent gọi `generate_chart` với SQL lấy `monthly_revenue` branch_id=1, tạo 1 file PNG (line chart), 12 điểm dữ liệu | File PNG tồn tại, mở được, không lỗi; số điểm dữ liệu trong chart = 12 |
+| 2a.2 | So sánh doanh thu 6 chi nhánh bằng biểu đồ | Agent tạo bar chart, 6 cột, đúng tên 6 chi nhánh, giá trị khớp bảng "Ranking chi nhánh theo tổng doanh thu" (test 2.18) | File PNG hợp lệ; giá trị mỗi cột trong sai số ~5% so với 2.18 |
+| 2a.3 | Câu hỏi thường (không ngụ ý biểu đồ), VD "Chi nhánh nào có NPL cao nhất?" | Agent KHÔNG gọi `generate_chart`, trả lời text bình thường qua `query_database` | Fail nếu agent tạo chart không cần thiết cho câu hỏi chỉ cần 1 giá trị |
+
+### 2b. Anomaly detection (`detect_anomalies` tool)
+
+Ground truth (tính bằng Python `statistics` trên toàn bộ `npl_records.npl_ratio`, threshold = mean + 2×stdev):
+mean ≈ 12.90%, stdev (population) ≈ 14.32%, ngưỡng bất thường ≈ 41.55%.
+
+| # | Question (VN/EN) | Expected anomalies (ground truth) | Pass/fail rule |
+|---|---|---|---|
+| 2b.1 | Chi nhánh/tháng nào có NPL ratio bất thường (>2 độ lệch chuẩn so với trung bình)? | 5 điểm: Hải Châu 2025-07 (55.88%), Long An 2025-07 (42.14%), Long An 2026-01 (44.32%), Long An 2026-02 (44.32%), Long An 2026-03 (44.32%) | Đúng đủ 5 điểm, không thiếu, không báo thêm điểm không phải outlier |
+| 2b.2 | Chi nhánh Thái Nguyên có NPL bất thường không? | Không (Thái Nguyên không nằm trong danh sách outlier ở 2b.1) | Agent phải trả lời "không có bất thường," không bịa ra bất thường không tồn tại |
+| 2b.3 (kiểm tra tool, không qua agent) | Gọi trực tiếp `detect_anomalies()` trong Python, không qua LLM | Trả về đúng list 5 điểm ở trên, dạng structured data (không phải câu văn) | So khớp chính xác từng điểm với ground truth |
+
+### 2c. Report export (`export_report` tool)
+
+| # | Question (VN/EN) | Expected result | Pass/fail rule |
+|---|---|---|---|
+| 2c.1 | Xuất file tổng hợp doanh thu 6 tháng gần nhất (2026-01 đến 2026-06) của tất cả chi nhánh | Agent gọi `export_report`, tạo file `.xlsx`/`.csv` với đúng 36 dòng (6 chi nhánh × 6 tháng) | File tồn tại, mở được bằng Excel/pandas, đúng 36 dòng, đủ cột branch_name/month/total_rev |
+| 2c.2 | Xuất file danh sách 10 khách hàng có rủi ro cao nhất (NPL, sắp xếp theo amount giảm dần) | 10 dòng, đứng đầu là CUST00071 (Hoàn Kiếm, Business, 1,677,000,000 VND), cuối là CUST00004 (Quận 1, Auto, 512,000,000 VND) | File có đúng 10 dòng, đúng thứ tự giảm dần theo amount, dòng đầu/cuối khớp ground truth |
+| 2c.3 | File tải xuống mở bằng Excel có đúng định dạng số không (không hiển thị dạng text hoặc ký tự lỗi) | Cột `amount`/`total_rev` là kiểu số (numeric), không phải string | Fail nếu Excel hiển thị số dạng text (căn trái thay vì căn phải) |
+| 2c.4 | Yêu cầu xuất báo cáo cho bảng/cột KHÔNG được phép (ngoài `ALLOWED_TABLES`) | Agent từ chối hoặc guardrail chặn trước khi `export_report` chạy | Fail nếu file vẫn được tạo ra |
+
+---
+
 ## Output 3 — Guardrail (`is_safe_query`) — unit + adversarial tests
 
 ### Unit tests (direct SQL string into `is_safe_query()`)
@@ -119,6 +151,7 @@ direct pass/fail check for this.
 
 1. Output 1 tests (1.1–1.10) — should already pass, re-run after any `generate_data.py` change
 2. Output 3 unit tests (3.1–3.8) — run as soon as `is_safe_query()` exists, before wiring into agent
-3. Output 2 integration tests (2.1–2.16) — run once `agent.py` + OpenAI key are confirmed working
-4. Output 3 adversarial tests (3.9–3.11) — run after Output 2 passes, since it needs the full loop
-5. Output 4 usability tests (4.1–4.6) — last, once Streamlit app is connected to the working agent
+3. Output 2 integration tests (2.1–2.22) — run once `agent.py` + OpenAI key are confirmed working
+4. Output 2 extended tests (2a.1–2a.3, 2b.1–2b.3, 2c.1–2c.4) — only after core Output 2 passes 10/10; see "rủi ro thời gian" note in `masterplan.md` before investing time here
+5. Output 3 adversarial tests (3.9–3.11) — run after Output 2 passes, since it needs the full loop
+6. Output 4 usability tests (4.1–4.6) — last, once Streamlit app is connected to the working agent

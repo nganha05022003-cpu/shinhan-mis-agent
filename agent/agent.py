@@ -19,6 +19,7 @@ Requires:
 import os
 import json
 import sqlite3
+import statistics
 
 from openai import OpenAI
 
@@ -27,6 +28,7 @@ from openai import OpenAI
 # ---------------------------------------------------------
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "shinhan_mis.db")
 MODEL = "gpt-4o-mini"  # swap for whatever model/tier you have access to
+ANOMALY_STDEV_THRESHOLD = 2  # flag npl_ratio values more than N stdevs above the mean
 
 ALLOWED_TABLES = {"branches", "loans", "monthly_revenue", "npl_records"}
 
@@ -76,6 +78,11 @@ Rules:
 - If a question is ambiguous, make a reasonable assumption and state it in your answer.
 - After you get query results, answer in natural language (Vietnamese or English,
   matching the user's question language). Do not just dump raw rows.
+- For questions asking about "bất thường" / "anomaly" / "outlier" in NPL ratio,
+  call detect_anomalies instead of writing your own SQL threshold — it uses a
+  real statistical rule (mean + 2 standard deviations), not a guessed number.
+  The tool returns the full list of outliers plus the mean/threshold used, so
+  you can also confirm a branch is NOT anomalous if it's absent from that list.
 """
 
 TOOLS = [
@@ -99,7 +106,26 @@ TOOLS = [
                 "required": ["sql"],
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "detect_anomalies",
+            "description": (
+                "Detect branch/month combinations where npl_ratio is a statistical "
+                "outlier — more than 2 standard deviations above the mean across all "
+                "branches and months in npl_records. Uses a fixed statistical rule "
+                "(z-score style threshold), not a model-guessed cutoff. Returns the "
+                "mean, standard deviation, threshold used, and the full list of "
+                "outlier rows (branch_name, month, npl_ratio). No arguments needed — "
+                "it always scans the full npl_records table."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
 ]
 
 
@@ -143,6 +169,55 @@ def query_database(sql: str) -> str:
 
 
 # ---------------------------------------------------------
+# detect_anomalies tool: fixed statistical rule (mean + N*stdev),
+# not an LLM-guessed threshold. Reads npl_records directly — this is a
+# known, safe, hardcoded query (not user-supplied SQL), so it bypasses
+# is_safe_query() the same way query_database's internals never let
+# arbitrary strings through unchecked.
+# ---------------------------------------------------------
+def detect_anomalies() -> str:
+    """Flag branch/month npl_ratio values more than ANOMALY_STDEV_THRESHOLD
+    standard deviations above the mean. Returns JSON with mean, stdev,
+    threshold, and the list of outlier rows."""
+    try:
+        con = sqlite3.connect(DB_PATH)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT b.branch_name, n.month, n.npl_ratio
+            FROM npl_records n
+            JOIN branches b ON b.branch_id = n.branch_id
+            """
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        con.close()
+    except sqlite3.Error as e:
+        return json.dumps({"error": f"SQL error: {e}"})
+
+    if not rows:
+        return json.dumps({"error": "No npl_records data found."})
+
+    values = [r["npl_ratio"] for r in rows]
+    mean = statistics.mean(values)
+    stdev = statistics.pstdev(values)
+    threshold = mean + ANOMALY_STDEV_THRESHOLD * stdev
+
+    outliers = [r for r in rows if r["npl_ratio"] > threshold]
+
+    return json.dumps(
+        {
+            "mean": round(mean, 2),
+            "stdev": round(stdev, 2),
+            "threshold": round(threshold, 2),
+            "outlier_count": len(outliers),
+            "outliers": outliers,
+        },
+        default=str,
+    )
+
+
+# ---------------------------------------------------------
 # Function-calling loop
 # ---------------------------------------------------------
 def ask_agent(client: OpenAI, question: str, verbose: bool = False) -> str:
@@ -163,16 +238,21 @@ def ask_agent(client: OpenAI, question: str, verbose: bool = False) -> str:
         if not msg.tool_calls:
             return msg.content
 
-        # Model wants to call query_database (possibly more than once)
+        # Model wants to call one or more tools
         messages.append(msg)
         for tool_call in msg.tool_calls:
-            args = json.loads(tool_call.function.arguments)
-            sql = args.get("sql", "")
+            tool_name = tool_call.function.name
+            args = json.loads(tool_call.function.arguments or "{}")
 
             if verbose:
-                print(f"[tool call] SQL: {sql}")
+                print(f"[tool call] {tool_name}({args})")
 
-            result = query_database(sql)
+            if tool_name == "query_database":
+                result = query_database(args.get("sql", ""))
+            elif tool_name == "detect_anomalies":
+                result = detect_anomalies()
+            else:
+                result = json.dumps({"error": f"Unknown tool: {tool_name}"})
 
             if verbose:
                 print(f"[tool result] {result[:300]}")

@@ -11,16 +11,18 @@ Usage:
   python3 agent/test_agent.py            # run everything
   python3 agent/test_agent.py core        # only core Q&A tests (2.1-2.16 set)
   python3 agent/test_agent.py anomaly     # only 2b anomaly detection test
+  python3 agent/test_agent.py chart       # only 2a chart generation tests
 
 Requires: OPENAI_API_KEY set in environment.
 """
 
 import os
 import sys
+import glob
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(__file__))
-from agent import ask_agent
+from agent import ask_agent, CHARTS_DIR
 from openai import OpenAI
 
 
@@ -119,6 +121,52 @@ def run_anomaly_test(client):
 
 
 # ---------------------------------------------------------
+# Group: 2a chart generation (generate_chart tool)
+# Ground truth (verified against shinhan_mis.db): ranking 12-month revenue,
+# descending: Quan 1 (~3,761M), Hoan Kiem (~2,350.5M), Binh Duong (~1,911.9M),
+# Hai Chau (~1,311.5M), Long An (~706.8M), Thai Nguyen (~634.6M) — matches
+# test 2.18. This test doubles as test 2a.2 from docs/test_cases.md.
+# ---------------------------------------------------------
+CHART_TEST_CASES = [
+    ("2a.2", "Xếp hạng chi nhánh theo tổng doanh thu toàn bộ 12 tháng, giảm dần, "
+             "vẽ biểu đồ giúp tôi"),
+]
+
+
+def run_chart_tests(client):
+    results = []
+    for test_id, question in CHART_TEST_CASES:
+        print(f"\n{'='*70}\n[{test_id}] {question}")
+
+        before = set(glob.glob(os.path.join(CHARTS_DIR, "*.png")))
+        try:
+            answer = ask_agent(client, question, verbose=True)
+        except Exception as e:
+            answer = f"ERROR: {e}"
+        after = set(glob.glob(os.path.join(CHARTS_DIR, "*.png")))
+        new_files = after - before
+
+        print(f"\nACTUAL ANSWER: {answer}")
+
+        if not new_files:
+            print("[FAIL] No new PNG file was created in outputs/charts/")
+            results.append((test_id, question, answer, False))
+            continue
+
+        newest = max(new_files, key=os.path.getmtime)
+        size = os.path.getsize(newest)
+        file_ok = size > 0
+        print(f"[{'PASS' if file_ok else 'FAIL'}] New chart file created: {newest} "
+              f"({size} bytes)")
+        print("Manually open this PNG to confirm it shows 6 branches, correctly "
+              "ordered descending, matching the ground truth above.")
+        results.append((test_id, question, answer, file_ok))
+
+    print_summary("CHART", results)
+    return results
+
+
+# ---------------------------------------------------------
 # Summary printer
 # ---------------------------------------------------------
 def print_summary(group_name, results):
@@ -147,9 +195,11 @@ def main():
         run_core_tests(client)
     if group in ("all", "anomaly"):
         run_anomaly_test(client)
+    if group in ("all", "chart"):
+        run_chart_tests(client)
 
-    if group not in ("all", "core", "anomaly"):
-        print(f"Unknown group '{group}'. Use: all | core | anomaly")
+    if group not in ("all", "core", "anomaly", "chart"):
+        print(f"Unknown group '{group}'. Use: all | core | anomaly | chart")
 
 
 if __name__ == "__main__":

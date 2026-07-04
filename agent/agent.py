@@ -17,9 +17,15 @@ Requires:
 """
 
 import os
+import re
 import json
+import time
 import sqlite3
 import statistics
+
+import matplotlib
+matplotlib.use("Agg")  # no display needed — we only save PNG files
+import matplotlib.pyplot as plt
 
 from openai import OpenAI
 
@@ -29,6 +35,7 @@ from openai import OpenAI
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "shinhan_mis.db")
 MODEL = "gpt-4o-mini"  # swap for whatever model/tier you have access to
 ANOMALY_STDEV_THRESHOLD = 2  # flag npl_ratio values more than N stdevs above the mean
+CHARTS_DIR = os.path.join(os.path.dirname(__file__), "..", "outputs", "charts")
 
 ALLOWED_TABLES = {"branches", "loans", "monthly_revenue", "npl_records"}
 
@@ -83,6 +90,13 @@ Rules:
   real statistical rule (mean + 2 standard deviations), not a guessed number.
   The tool returns the full list of outliers plus the mean/threshold used, so
   you can also confirm a branch is NOT anomalous if it's absent from that list.
+- For questions that ask to "vẽ biểu đồ" / "so sánh ... bằng biểu đồ" / "chart" /
+  "graph" / explicitly want a visual comparison or trend picture, call
+  generate_chart instead of (or in addition to) query_database. Write a SQL
+  query whose FIRST column is the label (e.g. branch_name or month) and SECOND
+  column is the numeric value to plot. Do NOT call generate_chart for a plain
+  question that just wants one number or a short text answer — only call it
+  when the user explicitly wants a chart/visual.
 """
 
 TOOLS = [
@@ -123,6 +137,44 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_chart",
+            "description": (
+                "Run a SQL SELECT query and render the results as a chart (PNG file). "
+                "The query's first column must be the label (x-axis), second column "
+                "the numeric value (y-axis). Saves the chart to outputs/charts/ and "
+                "returns the file path. Use only when the user explicitly wants a "
+                "chart/graph/visual comparison, not for plain text answers."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": (
+                            "SQLite SELECT statement. First column = label, "
+                            "second column = numeric value to plot."
+                        ),
+                    },
+                    "chart_type": {
+                        "type": "string",
+                        "enum": ["bar", "line"],
+                        "description": (
+                            "'line' for trends over time (e.g. revenue by month), "
+                            "'bar' for comparisons across categories (e.g. branches)."
+                        ),
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Chart title, in the same language as the question.",
+                    },
+                },
+                "required": ["sql", "chart_type", "title"],
             },
         },
     },
@@ -218,6 +270,91 @@ def detect_anomalies() -> str:
 
 
 # ---------------------------------------------------------
+# generate_chart tool: runs a query (through the same guardrail as
+# query_database — user-supplied SQL is never trusted just because it's
+# going into a chart instead of a text answer), then renders + saves a PNG.
+# agent.py only CREATES the file. Displaying it is Output 4's job (Streamlit
+# reads the returned path with st.image()) — see masterplan.md architecture note.
+# ---------------------------------------------------------
+def _slugify(text: str) -> str:
+    text = re.sub(r"[^\w\s-]", "", text).strip().lower()
+    return re.sub(r"[-\s]+", "_", text)[:50] or "chart"
+
+
+def generate_chart(sql: str, chart_type: str, title: str) -> str:
+    """Run sql, plot first column (labels) vs second column (values) as a
+    bar or line chart, save PNG to outputs/charts/, return path + metadata."""
+    safe, reason = is_safe_query(sql)
+    if not safe:
+        return json.dumps({"error": reason})
+
+    try:
+        con = sqlite3.connect(DB_PATH)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute(sql)
+        rows = [dict(r) for r in cur.fetchall()]
+        con.close()
+    except sqlite3.Error as e:
+        return json.dumps({"error": f"SQL error: {e}"})
+
+    if not rows:
+        return json.dumps({"error": "Query returned no rows to chart."})
+
+    columns = list(rows[0].keys())
+    if len(columns) < 2:
+        return json.dumps({"error": "Query must return at least 2 columns (label, value)."})
+
+    label_col, value_col = columns[0], columns[1]
+    labels = [str(r[label_col]) for r in rows]
+    values = [r[value_col] for r in rows]
+
+    try:
+        values = [float(v) for v in values]
+    except (TypeError, ValueError):
+        return json.dumps({"error": f"Second column '{value_col}' is not numeric."})
+
+    # Auto-scale large VND amounts so the y-axis shows readable units
+    # (tỷ/triệu) instead of matplotlib's ambiguous "1e9" scientific offset.
+    max_abs = max(abs(v) for v in values) if values else 0
+    if max_abs >= 1_000_000_000:
+        scale, unit = 1_000_000_000, "tỷ"
+    elif max_abs >= 1_000_000:
+        scale, unit = 1_000_000, "triệu"
+    else:
+        scale, unit = 1, ""
+    scaled_values = [v / scale for v in values]
+    ylabel = f"{value_col} ({unit} VND)" if unit else value_col
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    if chart_type == "line":
+        ax.plot(labels, scaled_values, marker="o")
+    else:
+        ax.bar(labels, scaled_values)
+    ax.set_title(title)
+    ax.set_xlabel(label_col)
+    ax.set_ylabel(ylabel)
+    ax.ticklabel_format(style="plain", axis="y")  # never show ambiguous 1eN offset
+    plt.xticks(rotation=30, ha="right")
+    fig.tight_layout()
+
+    os.makedirs(CHARTS_DIR, exist_ok=True)
+    filename = f"{_slugify(title)}_{int(time.time())}.png"
+    filepath = os.path.join(CHARTS_DIR, filename)
+    fig.savefig(filepath)
+    plt.close(fig)
+
+    return json.dumps(
+        {
+            "file_path": os.path.abspath(filepath),
+            "chart_type": chart_type,
+            "title": title,
+            "data_points": len(rows),
+        }
+    )
+
+
+# ---------------------------------------------------------
 # Function-calling loop
 # ---------------------------------------------------------
 def ask_agent(client: OpenAI, question: str, verbose: bool = False) -> str:
@@ -251,6 +388,12 @@ def ask_agent(client: OpenAI, question: str, verbose: bool = False) -> str:
                 result = query_database(args.get("sql", ""))
             elif tool_name == "detect_anomalies":
                 result = detect_anomalies()
+            elif tool_name == "generate_chart":
+                result = generate_chart(
+                    args.get("sql", ""),
+                    args.get("chart_type", "bar"),
+                    args.get("title", "Chart"),
+                )
             else:
                 result = json.dumps({"error": f"Unknown tool: {tool_name}"})
 

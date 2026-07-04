@@ -37,6 +37,15 @@ the query_database tool. You only have access to these 4 tables:
 
 branches(branch_id, branch_name, city, region, branch_size)
   - branch_size is one of: Flagship, Standard, Small
+  - IMPORTANT: branch_name values in the database do NOT have Vietnamese diacritics,
+    even though the user's question usually will. The 6 exact branch_name values are:
+    "Chi nhanh Quan 1", "Chi nhanh Hoan Kiem", "Chi nhanh Hai Chau",
+    "Chi nhanh Binh Duong", "Chi nhanh Long An", "Chi nhanh Thai Nguyen"
+  - Never do an exact match against an accented name the user typed (e.g. "Chi nhánh
+    Bình Dương"). Instead, match using LIKE with an unaccented keyword fragment from
+    the list above, e.g. WHERE branch_name LIKE '%Binh Duong%'. If you are unsure how
+    to strip accents yourself, just use the closest unaccented keyword from the list
+    (city name or branch identifier) in a LIKE pattern rather than an exact equals.
 
 loans(loan_id, branch_id, customer_id, customer_name, loan_type, amount,
       issue_date, due_date, repayment_status)
@@ -59,6 +68,11 @@ Rules:
 - For "current" NPL or portfolio questions, prefer loans.repayment_status.
 - For "trend" or "over time" or "last N months" questions, prefer
   monthly_revenue / npl_records (already aggregated by month).
+- Vietnamese phrasing "tổng số" / "số lượng" / "bao nhiêu khoản/cái" means COUNT
+  the number of rows (COUNT(*)) — it does NOT mean sum of money. Only use
+  SUM(amount) when the question asks for "tổng giá trị" / "tổng tiền" / a monetary
+  total. If unsure which one is meant, prefer COUNT for "how many loans/branches"
+  style questions and state your interpretation in the answer.
 - If a question is ambiguous, make a reasonable assumption and state it in your answer.
 - After you get query results, answer in natural language (Vietnamese or English,
   matching the user's question language). Do not just dump raw rows.

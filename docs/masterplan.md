@@ -14,10 +14,12 @@
 - [ ] **Mở rộng (mới thêm — 3/7):** khả năng tạo biểu đồ (chart) từ kết quả truy vấn.
 - [ ] **Mở rộng (mới thêm — 3/7):** anomaly detection có thuật toán rõ ràng (không chỉ dựa vào LLM đoán).
 - [ ] **Mở rộng (mới thêm — 3/7):** khả năng tổng hợp thành "report" nhiều dữ liệu (đã có sẵn qua SQL aggregation, chính thức hóa thành 1 loại câu hỏi được test).
+- [x] **Mở rộng (mới thêm — 6/7):** Morning Brief / Daily Digest — tự động tóm tắt khi mở app, không cần hỏi.
+- [x] **Mở rộng (mới thêm — 6/7):** What-if Scenario Analysis — agent tính toán kịch bản giả định (NPL tăng X% ảnh hưởng doanh thu ra sao), biến agent từ "tra cứu viên" thành "cố vấn."
 
 > Definition of Done (gốc): Trả lời đúng ít nhất 10/10 câu hỏi demo mẫu bạn tự soạn, và xử lý được ít nhất 1 câu hỏi ngoài kịch bản mà vẫn ra kết quả hợp lý.
 >
-> Definition of Done (mở rộng): Xem chi tiết 3 mục dưới.
+> Definition of Done (mở rộng): Xem chi tiết 5 mục dưới.
 
 ### 2a. Chart generation (mới)
 
@@ -47,7 +49,30 @@
 
 > Definition of Done: Yêu cầu 1 báo cáo cụ thể (VD "tổng hợp doanh thu 6 tháng gần nhất," "top 10 khách hàng rủi ro cao") → agent tạo đúng 1 file Excel/CSV mở được, dữ liệu khớp với SQL, không lỗi, không thiếu dòng; Streamlit hiển thị được nút tải file đó.
 
-**⚠️ Rủi ro thời gian:** 3 mục mở rộng trên (đặc biệt 2a và 2b) là phạm vi thêm ngoài kế hoạch gốc, trong khi deadline chỉ còn 9 ngày (đến 12/7). Nếu đến ngày 8/7 mà Output 2 gốc (function calling cơ bản) chưa chạy ổn định qua 10/10 câu hỏi demo, nên **tạm dừng 2a/2b**, ưu tiên hoàn thiện Output 3 và 4 trước — vì Definition of Done gốc của Output 2 vẫn là điều kiện bắt buộc, còn chart/anomaly là điểm cộng, không phải bắt buộc để nộp bài.
+### 2d. Morning Brief / Daily Digest (mới — 6/7)
+
+**Lý do:** đây là thứ manager muốn nhất — mở app lên là thấy ngay tình hình, không cần nghĩ câu hỏi để gõ. Đúng tinh thần "agent chủ động," không phải chỉ trả lời khi được hỏi.
+
+**Thiết kế:** đây KHÔNG phải 1 tool trong `TOOLS` (không qua vòng lặp function-calling/LLM) — mà là 1 hàm Python thuần (`generate_daily_digest()`) tính trực tiếp bằng SQL: so sánh tháng mới nhất với tháng trước đó (NPL ratio thay đổi bao nhiêu điểm %, doanh thu thay đổi bao nhiêu %), cộng danh sách các khoản vay NPL lớn nhất hiện tại. Lý do không dùng LLM: (1) số liệu luôn chính xác 100%, không có rủi ro model tính sai/bịa số; (2) không tốn phí API dù hàm này chạy mỗi lần Streamlit mở trang. Output 4 (Streamlit) gọi hàm này ngay khi trang load và hiển thị phía trên khung chat, trước khi user hỏi gì.
+
+> Definition of Done: Mở app lên (không hỏi gì) → thấy ngay 1 đoạn tóm tắt đúng số liệu thật (verify bằng SQL tay), có cả bản tiếng Việt và tiếng Anh tùy theo ngôn ngữ đang chọn. ✅ Đã verify — xem `docs/test_cases.md` mục 2d.
+
+### 2e. What-if Scenario Analysis (mới — 6/7)
+
+**Lý do:** đây là thứ biến agent từ "tra cứu viên" (chỉ trả lời câu hỏi có sẵn trong data) thành "cố vấn" (đưa ra dự báo có căn cứ) — đúng tinh thần agentic mà giám khảo tìm kiếm.
+
+**Thiết kế:** thêm tool thứ 5 tên `whatif_npl_scenario` — nhận `branch_query` (tên chi nhánh, hoặc "system" cho toàn hệ thống) và `npl_increase_pct` (số điểm % NPL tăng thêm giả định). Công thức **minh bạch, dựa trên data thật** của chính chi nhánh đó (không phải hằng số bịa ra):
+1. `yield_rate = doanh thu hiện tại / dư nợ đang performing` — tỷ suất sinh lãi thực tế của chi nhánh này trong tháng gần nhất.
+2. Áp NPL ratio giả định mới → tính ra thêm bao nhiêu dư nợ rơi vào nợ xấu.
+3. Giả định phần dư nợ mới thành NPL đó ngừng sinh lãi ở `yield_rate` → đó là doanh thu bị mất.
+
+Tool trả về đầy đủ số liệu trung gian + câu giải thích giả định, để agent trình bày minh bạch chứ không chỉ đưa ra 1 con số từ hư không.
+
+**Bug đã phát hiện và sửa lúc implement:** ban đầu, nếu `branch_query` không khớp chi nhánh nào (VD gõ sai tên), hàm âm thầm coi như "toàn hệ thống" thay vì báo lỗi — rất dễ gây hiểu lầm. Đã sửa để phân biệt rõ 3 trạng thái: chi nhánh cụ thể / toàn hệ thống (yêu cầu rõ ràng) / không tìm thấy (phải báo lỗi).
+
+> Definition of Done: Hỏi "Nếu NPL ratio chi nhánh X tăng thêm Y% thì doanh thu ảnh hưởng thế nào?" → agent gọi đúng tool, trả lời đúng số liệu (so với tính tay), có nêu giả định. ✅ Đã verify — xem `docs/test_cases.md` mục 2e.
+
+**⚠️ Rủi ro thời gian:** 5 mục mở rộng trên (2a-2e) là phạm vi thêm ngoài kế hoạch gốc, trong khi deadline chỉ còn 6 ngày (đến 12/7). Nếu Output 2 gốc (function calling cơ bản) chưa chạy ổn định qua 10/10 câu hỏi demo, nên ưu tiên hoàn thiện Output 3 và 4 trước — vì Definition of Done gốc của Output 2 vẫn là điều kiện bắt buộc, còn 2a-2e là điểm cộng, không phải bắt buộc để nộp bài.
 
 **Output 3: Guardrail**
 
@@ -60,6 +85,8 @@
 - [ ] 1 app Streamlit (`app.py`) — ô chat, hiển thị câu trả lời, sidebar gợi ý câu hỏi mẫu.
 - [ ] Nếu 2a (chart) hoàn thành: hiển thị được file PNG chart trả về từ agent bằng `st.image()`.
 - [ ] Nếu 2c (report) hoàn thành: hiển thị nút tải xuống bằng `st.download_button()` đọc file mà `generate_report` đã tạo.
+- [x] Nếu 2d (Morning Brief) hoàn thành: hiển thị đoạn tóm tắt tự động ngay khi trang load, phía trên khung chat, gọi trực tiếp `generate_daily_digest()` (không qua vòng lặp chat).
+- [x] Bilingual VI/EN toggle, song ngữ áp dụng cho: câu trả lời chat, chart title/đơn vị trục, và Morning Brief.
 
 > Definition of Done: Người lạ (không phải bạn) có thể mở app, gõ câu hỏi, nhận câu trả lời đúng trong dưới 30 giây — không cần bạn hướng dẫn gì thêm. Xem `docs/test_cases.md` mục Output 4.
 

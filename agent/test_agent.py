@@ -13,17 +13,19 @@ Usage:
   python3 agent/test_agent.py anomaly     # only 2b anomaly detection test
   python3 agent/test_agent.py chart       # only 2a chart generation tests
   python3 agent/test_agent.py report      # only 2c report generation tests
+  python3 agent/test_agent.py digest      # only 2d Morning Brief test (no API key needed)
+  python3 agent/test_agent.py whatif      # only 2e What-if Scenario test
 
-Requires: OPENAI_API_KEY set in environment.
+Requires: OPENAI_API_KEY set in environment (except the 'digest' group, and
+the deterministic half of 'whatif', which never call the LLM).
 """
 
 import os
 import sys
-import glob
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(__file__))
-from agent import ask_agent, CHARTS_DIR, REPORTS_DIR
+from agent import ask_agent, generate_daily_digest, whatif_npl_scenario
 from openai import OpenAI
 
 
@@ -46,7 +48,8 @@ def check_answer(answer: str, key_facts: list[str]) -> bool:
 def run_question(client, test_id, question, key_facts):
     print(f"\n{'='*70}\n[{test_id}] {question}")
     try:
-        answer = ask_agent(client, question, verbose=False)
+        result = ask_agent(client, question, verbose=False)
+        answer = result["answer"]
     except Exception as e:
         answer = f"ERROR: {e}"
 
@@ -139,26 +142,24 @@ def run_chart_tests(client):
     for test_id, question in CHART_TEST_CASES:
         print(f"\n{'='*70}\n[{test_id}] {question}")
 
-        before = set(glob.glob(os.path.join(CHARTS_DIR, "*.png")))
         try:
-            answer = ask_agent(client, question, verbose=True)
+            result = ask_agent(client, question, verbose=True)
+            answer = result["answer"]
+            chart_files = result["chart_files"]
         except Exception as e:
-            answer = f"ERROR: {e}"
-        after = set(glob.glob(os.path.join(CHARTS_DIR, "*.png")))
-        new_files = after - before
+            answer, chart_files = f"ERROR: {e}", []
 
         print(f"\nACTUAL ANSWER: {answer}")
 
-        if not new_files:
-            print("[FAIL] No new PNG file was created in outputs/charts/")
+        if not chart_files:
+            print("[FAIL] ask_agent() reported no chart_files created")
             results.append((test_id, question, answer, False))
             continue
 
-        newest = max(new_files, key=os.path.getmtime)
-        size = os.path.getsize(newest)
-        file_ok = size > 0
-        print(f"[{'PASS' if file_ok else 'FAIL'}] New chart file created: {newest} "
-              f"({size} bytes)")
+        newest = chart_files[-1]
+        file_ok = os.path.exists(newest) and os.path.getsize(newest) > 0
+        print(f"[{'PASS' if file_ok else 'FAIL'}] Chart file created: {newest} "
+              f"({os.path.getsize(newest) if os.path.exists(newest) else 0} bytes)")
         print("Manually open this PNG to confirm it shows 6 branches, correctly "
               "ordered descending, matching the ground truth above.")
         results.append((test_id, question, answer, file_ok))
@@ -180,42 +181,39 @@ REPORT_TEST_CASES = [
 
 
 def run_report_tests(client):
+    import pandas as pd
+
     results = []
     for test_id, question in REPORT_TEST_CASES:
         print(f"\n{'='*70}\n[{test_id}] {question}")
 
-        before = set(glob.glob(os.path.join(REPORTS_DIR, "*")))
         try:
-            answer = ask_agent(client, question, verbose=True)
+            result = ask_agent(client, question, verbose=True)
+            answer = result["answer"]
+            report_files = result["report_files"]
         except Exception as e:
-            answer = f"ERROR: {e}"
-        after = set(glob.glob(os.path.join(REPORTS_DIR, "*")))
-        new_files = after - before
+            answer, report_files = f"ERROR: {e}", []
 
         print(f"\nACTUAL ANSWER: {answer}")
 
-        if not new_files:
-            print("[FAIL] No new report file was created in outputs/reports/")
+        if not report_files:
+            print("[FAIL] ask_agent() reported no report_files created")
             results.append((test_id, question, answer, False))
             continue
 
-        newest = max(new_files, key=os.path.getmtime)
-        size = os.path.getsize(newest)
+        newest = report_files[-1]
+        size = os.path.getsize(newest) if os.path.exists(newest) else 0
 
         row_count = None
         try:
-            import pandas as pd
-            if newest.endswith(".xlsx"):
-                df = pd.read_excel(newest)
-            else:
-                df = pd.read_csv(newest)
+            df = pd.read_excel(newest) if newest.endswith(".xlsx") else pd.read_csv(newest)
             row_count = len(df)
         except Exception as e:
             print(f"  (could not reopen file to count rows: {e})")
 
         expected_rows = 6
         file_ok = size > 0 and (row_count is None or row_count == expected_rows)
-        print(f"[{'PASS' if file_ok else 'FAIL'}] New report file created: {newest} "
+        print(f"[{'PASS' if file_ok else 'FAIL'}] Report file created: {newest} "
               f"({size} bytes, {row_count} rows — expect {expected_rows})")
         print("Manually open this file to confirm the 6 monthly revenue values "
               "match ground truth: 45,955,856 / 53,842,068 / 67,155,230 / "
@@ -223,6 +221,90 @@ def run_report_tests(client):
         results.append((test_id, question, answer, file_ok))
 
     print_summary("REPORT", results)
+    return results
+
+
+# ---------------------------------------------------------
+# Group: 2d Morning Brief (generate_daily_digest — no LLM call, no API cost)
+# Ground truth (verified against shinhan_mis.db, month 2026-06 vs 2026-05):
+# Chi nhanh Quan 1 revenue dropped 32.7%; top 2 current NPL loans are
+# Khach hang 071 (1,677,000,000 VND) and Khach hang 096 (1,553,000,000 VND).
+# ---------------------------------------------------------
+def run_digest_test():
+    print(f"\n{'='*70}\n[2d.1] generate_daily_digest — Morning Brief (both languages)")
+    results = []
+    for lang in ("vi", "en"):
+        digest = generate_daily_digest(lang=lang)
+        text = digest[lang]
+        print(f"\n--- {lang.upper()} ---\n{text}")
+
+        checks = {
+            "Mentions Quan 1's revenue drop": "Quan 1" in text,
+            "Revenue drop % matches ground truth (32.7%)": "32.7" in text,
+            "Mentions top NPL loan amount (1,677,000,000)": "1,677,000,000" in text,
+        }
+        passed = all(checks.values())
+        for label, ok in checks.items():
+            print(f"[{'PASS' if ok else 'FAIL'}] {label}")
+        results.append((f"2d.1-{lang}", f"generate_daily_digest(lang='{lang}')", text, passed))
+
+    print_summary("DIGEST", results)
+    return results
+
+
+# ---------------------------------------------------------
+# Group: 2e What-if Scenario Analysis (whatif_npl_scenario)
+# Ground truth (verified against shinhan_mis.db, latest month 2026-06):
+#   Binh Duong +2pp NPL: current_npl_ratio 3.21%, new_npl_ratio 5.21%,
+#     current_revenue 323,525,398 VND, revenue_loss ~6,684,838 VND (~2.07%).
+#   System-wide +2pp NPL: current_npl_ratio 8.18%, new_npl_ratio 10.18%,
+#     revenue_loss ~32,204,796 VND (~2.18%).
+#   Unknown branch name -> must return an error, NOT silently fall back to
+#     system-wide (this was a real bug caught during implementation).
+# ---------------------------------------------------------
+def run_whatif_test(client):
+    import json
+
+    results = []
+
+    # --- Deterministic checks (no LLM, no API cost) ---
+    print(f"\n{'='*70}\n[2e.1] whatif_npl_scenario('Binh Duong', 2) — deterministic math")
+    r1 = json.loads(whatif_npl_scenario("Binh Duong", 2, "vi"))
+    print(r1)
+    ok1 = (
+        r1.get("current_npl_ratio") == 3.21
+        and r1.get("new_npl_ratio") == 5.21
+        and abs(r1.get("revenue_loss", 0) - 6684838) < 100
+    )
+    print(f"[{'PASS' if ok1 else 'FAIL'}] Matches ground truth numbers")
+    results.append(("2e.1", "whatif_npl_scenario('Binh Duong', 2)", str(r1), ok1))
+
+    print(f"\n{'='*70}\n[2e.2] whatif_npl_scenario('system', 2) — deterministic math")
+    r2 = json.loads(whatif_npl_scenario("system", 2, "en"))
+    print(r2)
+    ok2 = (
+        r2.get("current_npl_ratio") == 8.18
+        and r2.get("new_npl_ratio") == 10.18
+        and abs(r2.get("revenue_loss", 0) - 32204796) < 100
+    )
+    print(f"[{'PASS' if ok2 else 'FAIL'}] Matches ground truth numbers")
+    results.append(("2e.2", "whatif_npl_scenario('system', 2)", str(r2), ok2))
+
+    print(f"\n{'='*70}\n[2e.3-adversarial] whatif_npl_scenario('Nonexistent Branch XYZ', 2) "
+          "— must error, not silently fall back to system-wide")
+    r3 = json.loads(whatif_npl_scenario("Nonexistent Branch XYZ", 2, "en"))
+    print(r3)
+    ok3 = "error" in r3
+    print(f"[{'PASS' if ok3 else 'FAIL'}] Returned an error instead of a silent system-wide answer")
+    results.append(("2e.3-adversarial", "whatif_npl_scenario('Nonexistent Branch XYZ', 2)", str(r3), ok3))
+
+    # --- End-to-end through the LLM (confirms the model calls the tool
+    #     correctly from a natural-language question) ---
+    question = "Nếu NPL ratio chi nhánh Bình Dương tăng thêm 2% thì doanh thu ảnh hưởng thế nào?"
+    result = run_question(client, "2e.4", question, ["6,684,838", "6684838", "2.07", "2.1"])
+    results.append(result)
+
+    print_summary("WHATIF", results)
     return results
 
 
@@ -244,12 +326,17 @@ def print_summary(group_name, results):
 # Entry point
 # ---------------------------------------------------------
 def main():
+    group = sys.argv[1] if len(sys.argv) > 1 else "all"
+
+    # 'digest' never calls the LLM, so it doesn't need an API key.
+    if group == "digest":
+        run_digest_test()
+        return
+
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise SystemExit("OPENAI_API_KEY not set.")
     client = OpenAI(api_key=api_key)
-
-    group = sys.argv[1] if len(sys.argv) > 1 else "all"
 
     if group in ("all", "core"):
         run_core_tests(client)
@@ -259,9 +346,13 @@ def main():
         run_chart_tests(client)
     if group in ("all", "report"):
         run_report_tests(client)
+    if group == "all":
+        run_digest_test()
+    if group in ("all", "whatif"):
+        run_whatif_test(client)
 
-    if group not in ("all", "core", "anomaly", "chart", "report"):
-        print(f"Unknown group '{group}'. Use: all | core | anomaly | chart | report")
+    if group not in ("all", "core", "anomaly", "chart", "report", "digest", "whatif"):
+        print(f"Unknown group '{group}'. Use: all | core | anomaly | chart | report | digest | whatif")
 
 
 if __name__ == "__main__":

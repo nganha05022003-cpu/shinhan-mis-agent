@@ -109,6 +109,24 @@ mean ≈ 12.90%, stdev (population) ≈ 14.32%, ngưỡng bất thường ≈ 41
 | 2c.2 | Tạo file danh sách 10 khách hàng có rủi ro cao nhất (NPL, sắp xếp theo amount giảm dần) | 10 dòng, đứng đầu là CUST00071 (Hoàn Kiếm, Business, 1,677,000,000 VND), cuối là CUST00004 (Quận 1, Auto, 512,000,000 VND); cột `amount` phải là kiểu numeric | File có đúng 10 dòng, đúng thứ tự giảm dần theo amount, dòng đầu/cuối khớp ground truth, đúng kiểu số |
 | 2c.3 | Yêu cầu tạo báo cáo cho bảng/cột KHÔNG được phép (ngoài `ALLOWED_TABLES`) | Agent từ chối hoặc guardrail chặn trước khi `generate_report` chạy | Fail nếu file vẫn được tạo ra |
 
+### 2d. Morning Brief (`generate_daily_digest` — no LLM call, no API cost)
+
+**Lưu ý kiến trúc:** hàm này tính toán thuần bằng Python/SQL, không gọi OpenAI — chạy mỗi lần mở app (Output 4) mà không tốn phí, và số liệu luôn chính xác 100% vì không qua model. Ground truth (tính trực tiếp từ `shinhan_mis.db`, tháng 2026-06 so với 2026-05): doanh thu Chi nhánh Quận 1 giảm 32.7%; 2 khoản vay NPL lớn nhất hiện tại là Khách hàng 071 (1,677,000,000 VND) và Khách hàng 096 (1,553,000,000 VND).
+
+| # | Input | Expected result | Pass/fail rule |
+|---|---|---|---|
+| 2d.1 | Gọi trực tiếp `generate_daily_digest(lang="vi")` và `generate_daily_digest(lang="en")`, không qua LLM | Cả 2 ngôn ngữ đều nêu đúng: doanh thu Quận 1 giảm 32.7%, và top 2 khoản vay NPL đúng tên/số tiền ở trên | Fail nếu thiếu 1 trong 3 fact, hoặc số liệu sai lệch |
+
+### 2e. What-if Scenario Analysis (`whatif_npl_scenario` tool)
+
+**Lưu ý kiến trúc:** công thức minh bạch — `yield_rate = doanh thu hiện tại / dư nợ đang performing` (tính từ chính data thật của chi nhánh đó, không phải hằng số bịa), áp NPL ratio giả định mới để tính phần dư nợ mới rơi vào nợ xấu, giả định phần đó ngừng sinh lãi. Ground truth (tháng 2026-06): Bình Dương +2 điểm % NPL → npl_ratio hiện tại 3.21% → 5.21%, doanh thu hiện tại 323,525,398 VND, mất ~6,684,838 VND (~2.07%). Toàn hệ thống +2 điểm % NPL → npl_ratio 8.18% → 10.18%, mất ~32,204,796 VND (~2.18%).
+
+| # | Question / Input | Expected result | Pass/fail rule |
+|---|---|---|---|
+| 2e.1 | Nếu NPL ratio chi nhánh Bình Dương tăng thêm 2% thì doanh thu ảnh hưởng thế nào? | Agent gọi `whatif_npl_scenario`, trả lời nêu đúng: npl_ratio mới 5.21%, mất khoảng 6,684,838 VND doanh thu (~2.07%), có giải thích ngắn gọn giả định (dư nợ mới thành NPL ngừng sinh lãi) | Đúng số liệu (sai số làm tròn), phải nêu được giả định, không được tự bịa công thức khác |
+| 2e.2 (kiểm tra tool trực tiếp, không tốn API) | Gọi trực tiếp `whatif_npl_scenario("system", 2)` | npl_ratio 8.18% → 10.18%, mất ~32,204,796 VND | So khớp chính xác với ground truth |
+| 2e.3 (adversarial, kiểm tra tool trực tiếp) | Gọi `whatif_npl_scenario("Nonexistent Branch XYZ", 2)` | Trả về lỗi rõ ràng ("No branch matching...") — KHÔNG được tự động chuyển sang tính toàn hệ thống mà không báo | Fail nếu trả về kết quả system-wide mà không có cảnh báo/lỗi — đây là bug thật đã phát hiện và sửa lúc implement |
+
 ---
 
 ## Output 3 — Guardrail (`is_safe_query`) — unit + adversarial tests
@@ -163,8 +181,8 @@ direct pass/fail check for this.
 1. Output 1 tests (1.1–1.10) — should already pass, re-run after any `generate_data.py` change (không tốn API, chạy SQL trực tiếp)
 2. Output 3 unit tests (3.1–3.8) — run as soon as `is_safe_query()` exists, before wiring into agent (không tốn API, gọi hàm Python trực tiếp)
 3. Output 2 integration tests (2.1, 2.4, 2.5, 2.7-2.10, 2.12-2.16, 2.18-2.20, 2.22) — run once `agent.py` + OpenAI key are confirmed working
-4. Output 2 extended tests (2a.1-2a.2, 2b.1-2b.2, 2c.1-2c.3) — only after core Output 2 passes 10/10; see "rủi ro thời gian" note in `masterplan.md` before investing time here
+4. Output 2 extended tests (2a.1-2a.2, 2b.1-2b.2, 2c.1-2c.3, 2d.1, 2e.1-2e.3) — only after core Output 2 passes 10/10; see "rủi ro thời gian" note in `masterplan.md` before investing time here. 2d.1 and 2e.2-2e.3 don't call the LLM, so run those first/freely — only 2e.1 costs an API call.
 5. Output 3 adversarial tests (3.9-3.10) — run after Output 2 passes, since it needs the full loop
 6. Output 4 usability tests (4.1–4.7) — last, once Streamlit app is connected to the working agent
 
-**Ghi chú giảm số lần gọi API:** tổng số test case cần gọi OpenAI API đã giảm từ 34 xuống 24 (~30%), bằng cách: bỏ câu hỏi trùng mục đích (cùng loại truy vấn/lập luận đã được test ở câu khác), gộp 2 câu hỏi cùng chủ đề thành 1 câu hỏi kép khi có thể, và chuyển các kiểm tra không cần LLM (VD kiểm tra định dạng file, kiểm tra agent không gọi tool thừa) thành quan sát thụ động trên kết quả đã có, thay vì tạo thêm 1 lần gọi API riêng. Vẫn giữ đủ các loại kiểm tra: superlative (2.1, 2.7, 2.10, 2.12), point lookup (2.9, 2.14), count (2.8, 2.13), average (2.12), trend (2.15), ranking (2.18, 2.19), explanatory (2.20, 2.22), chart (2a.1-2a.2), anomaly (2b.1), report (2c.1-2c.3), adversarial (3.9-3.10), usability (4.1-4.7).
+**Ghi chú giảm số lần gọi API:** tổng số test case cần gọi OpenAI API đã giảm từ 34 xuống 24 (~30%), bằng cách: bỏ câu hỏi trùng mục đích (cùng loại truy vấn/lập luận đã được test ở câu khác), gộp 2 câu hỏi cùng chủ đề thành 1 câu hỏi kép khi có thể, và chuyển các kiểm tra không cần LLM (VD kiểm tra định dạng file, kiểm tra agent không gọi tool thừa) thành quan sát thụ động trên kết quả đã có, thay vì tạo thêm 1 lần gọi API riêng. Vẫn giữ đủ các loại kiểm tra: superlative (2.1, 2.7, 2.10, 2.12), point lookup (2.9, 2.14), count (2.8, 2.13), average (2.12), trend (2.15), ranking (2.18, 2.19), explanatory (2.20, 2.22), chart (2a.1-2a.2), anomaly (2b.1), report (2c.1-2c.3), morning brief (2d.1 — free, no API), what-if scenario (2e.1-2e.3 — mostly free), adversarial (3.9-3.10), usability (4.1-4.7).

@@ -26,6 +26,7 @@ import statistics
 import matplotlib
 matplotlib.use("Agg")  # no display needed — we only save PNG files
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from openai import OpenAI
 
@@ -36,6 +37,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "shinhan_mis.db"
 MODEL = "gpt-4o-mini"  # swap for whatever model/tier you have access to
 ANOMALY_STDEV_THRESHOLD = 2  # flag npl_ratio values more than N stdevs above the mean
 CHARTS_DIR = os.path.join(os.path.dirname(__file__), "..", "outputs", "charts")
+REPORTS_DIR = os.path.join(os.path.dirname(__file__), "..", "outputs", "reports")
 
 ALLOWED_TABLES = {"branches", "loans", "monthly_revenue", "npl_records"}
 
@@ -97,6 +99,11 @@ Rules:
   column is the numeric value to plot. Do NOT call generate_chart for a plain
   question that just wants one number or a short text answer — only call it
   when the user explicitly wants a chart/visual.
+- For questions that ask to "xuất file" / "tạo báo cáo" / "tải xuống" / "report"
+  / explicitly want a downloadable file (Excel/CSV) rather than a chat answer,
+  call generate_report. Pick a short, descriptive filename (no spaces needed —
+  underscores are fine) that reflects what the report contains. Do NOT call
+  generate_report for a plain question that just wants a quick answer in chat.
 """
 
 TOOLS = [
@@ -178,21 +185,81 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_report",
+            "description": (
+                "Run a SQL SELECT query and export the results as a downloadable "
+                "Excel (.xlsx) or CSV file, saved to outputs/reports/. Returns the "
+                "file path, row count, and column names. Use only when the user "
+                "explicitly wants a file/report to download, not for plain "
+                "chat answers."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "SQLite SELECT statement whose results become the report rows.",
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": (
+                            "Short descriptive filename WITHOUT extension, "
+                            "e.g. 'top_10_khach_hang_rui_ro_cao'."
+                        ),
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["xlsx", "csv"],
+                        "description": "File format. Default to 'xlsx' unless the user asks for CSV.",
+                    },
+                },
+                "required": ["sql", "filename", "format"],
+            },
+        },
+    },
 ]
 
 
 # ---------------------------------------------------------
-# Guardrail placeholder (Output 3 will replace/extend this
-# with the full is_safe_query() in agent/guardrail.py)
+# Guardrail (Output 3) — ALLOWLIST over blocklist.
+# Instead of trying to enumerate every dangerous keyword (a blocklist, which
+# can never be complete — an attacker only needs one word we forgot), this
+# defines exactly what IS allowed and rejects everything else by default:
+#   1. Exactly ONE SQL statement (no stacked queries via ';').
+#   2. That statement must start with SELECT.
+#   3. Every table referenced must be in ALLOWED_TABLES.
+# A blocklist of obviously dangerous keywords is kept only as a secondary,
+# defense-in-depth layer — it is NOT the primary protection.
 # ---------------------------------------------------------
 def is_safe_query(sql: str) -> tuple[bool, str]:
-    """Minimal safety check. Full version lives in Output 3."""
-    normalized = sql.strip().lower()
+    """Validate a SQL string before it's ever executed. Returns (True, "")
+    if safe, or (False, reason) if rejected."""
+    stripped = sql.strip()
+    normalized = stripped.lower()
 
+    # Rule 1 (allowlist): exactly one statement, no stacked queries.
+    # Reject any ';' that isn't just a single trailing terminator — this is
+    # what actually stops "SELECT ...; DROP TABLE ...;" style attacks,
+    # regardless of what keyword the second statement uses.
+    body = stripped[:-1] if stripped.endswith(";") else stripped
+    if ";" in body:
+        return False, "Only a single SQL statement is allowed (no ';' stacked queries)."
+
+    # Rule 2 (allowlist): must be a SELECT statement.
     if not normalized.startswith("select"):
         return False, "Only SELECT statements are allowed."
 
-    forbidden = ["insert", "update", "delete", "drop", "alter", "attach", "pragma", ";--"]
+    # Rule 3 (allowlist): every referenced table must be whitelisted.
+    mentioned_tables = re.findall(r"(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)", normalized)
+    for table in mentioned_tables:
+        if table not in ALLOWED_TABLES:
+            return False, f"Table '{table}' is not in the allowed table list."
+
+    # Secondary blocklist layer (defense in depth, not primary defense).
+    forbidden = ["insert", "update", "delete", "drop", "alter", "attach", "pragma", "create", "replace"]
     if any(word in normalized for word in forbidden):
         return False, "Query contains a forbidden keyword."
 
@@ -355,6 +422,56 @@ def generate_chart(sql: str, chart_type: str, title: str) -> str:
 
 
 # ---------------------------------------------------------
+# generate_report tool: runs a query (through the same guardrail), writes the
+# result to a real Excel/CSV file with pandas. agent.py only CREATES the file
+# — "download" is Output 4's job (Streamlit st.download_button() reads this
+# path). See masterplan.md 2c architecture note: there is NO separate
+# "export_report" tool — creating and downloading are different concerns.
+# ---------------------------------------------------------
+def generate_report(sql: str, filename: str, format: str = "xlsx") -> str:
+    """Run sql, write results to outputs/reports/<filename>.<format>,
+    return path + row/column metadata."""
+    safe, reason = is_safe_query(sql)
+    if not safe:
+        return json.dumps({"error": reason})
+
+    try:
+        con = sqlite3.connect(DB_PATH)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute(sql)
+        rows = [dict(r) for r in cur.fetchall()]
+        con.close()
+    except sqlite3.Error as e:
+        return json.dumps({"error": f"SQL error: {e}"})
+
+    if not rows:
+        return json.dumps({"error": "Query returned no rows to export."})
+
+    df = pd.DataFrame(rows)
+
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    safe_name = _slugify(filename)
+    format = format if format in ("xlsx", "csv") else "xlsx"
+    filepath = os.path.join(REPORTS_DIR, f"{safe_name}.{format}")
+
+    if format == "xlsx":
+        df.to_excel(filepath, index=False)
+    else:
+        df.to_csv(filepath, index=False)
+
+    return json.dumps(
+        {
+            "file_path": os.path.abspath(filepath),
+            "format": format,
+            "row_count": len(df),
+            "columns": list(df.columns),
+        },
+        default=str,
+    )
+
+
+# ---------------------------------------------------------
 # Function-calling loop
 # ---------------------------------------------------------
 def ask_agent(client: OpenAI, question: str, verbose: bool = False) -> str:
@@ -393,6 +510,12 @@ def ask_agent(client: OpenAI, question: str, verbose: bool = False) -> str:
                     args.get("sql", ""),
                     args.get("chart_type", "bar"),
                     args.get("title", "Chart"),
+                )
+            elif tool_name == "generate_report":
+                result = generate_report(
+                    args.get("sql", ""),
+                    args.get("filename", "report"),
+                    args.get("format", "xlsx"),
                 )
             else:
                 result = json.dumps({"error": f"Unknown tool: {tool_name}"})

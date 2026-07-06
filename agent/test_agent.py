@@ -12,6 +12,7 @@ Usage:
   python3 agent/test_agent.py core        # only core Q&A tests (2.1-2.16 set)
   python3 agent/test_agent.py anomaly     # only 2b anomaly detection test
   python3 agent/test_agent.py chart       # only 2a chart generation tests
+  python3 agent/test_agent.py report      # only 2c report generation tests
 
 Requires: OPENAI_API_KEY set in environment.
 """
@@ -22,7 +23,7 @@ import glob
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(__file__))
-from agent import ask_agent, CHARTS_DIR
+from agent import ask_agent, CHARTS_DIR, REPORTS_DIR
 from openai import OpenAI
 
 
@@ -167,6 +168,65 @@ def run_chart_tests(client):
 
 
 # ---------------------------------------------------------
+# Group: 2c report generation (generate_report tool)
+# Ground truth (verified against shinhan_mis.db): Thai Nguyen monthly_revenue
+# for 2026-01..2026-06 = 6 rows: 45,955,856 / 53,842,068 / 67,155,230 /
+# 69,942,276 / 73,344,343 / 53,419,034 VND.
+# ---------------------------------------------------------
+REPORT_TEST_CASES = [
+    ("2c-custom", "Yêu cầu 1 báo cáo cụ thể: tổng hợp doanh thu 6 tháng gần nhất "
+                  "(2026-01 đến 2026-06) của Chi nhánh Thái Nguyên, xuất ra file"),
+]
+
+
+def run_report_tests(client):
+    results = []
+    for test_id, question in REPORT_TEST_CASES:
+        print(f"\n{'='*70}\n[{test_id}] {question}")
+
+        before = set(glob.glob(os.path.join(REPORTS_DIR, "*")))
+        try:
+            answer = ask_agent(client, question, verbose=True)
+        except Exception as e:
+            answer = f"ERROR: {e}"
+        after = set(glob.glob(os.path.join(REPORTS_DIR, "*")))
+        new_files = after - before
+
+        print(f"\nACTUAL ANSWER: {answer}")
+
+        if not new_files:
+            print("[FAIL] No new report file was created in outputs/reports/")
+            results.append((test_id, question, answer, False))
+            continue
+
+        newest = max(new_files, key=os.path.getmtime)
+        size = os.path.getsize(newest)
+
+        row_count = None
+        try:
+            import pandas as pd
+            if newest.endswith(".xlsx"):
+                df = pd.read_excel(newest)
+            else:
+                df = pd.read_csv(newest)
+            row_count = len(df)
+        except Exception as e:
+            print(f"  (could not reopen file to count rows: {e})")
+
+        expected_rows = 6
+        file_ok = size > 0 and (row_count is None or row_count == expected_rows)
+        print(f"[{'PASS' if file_ok else 'FAIL'}] New report file created: {newest} "
+              f"({size} bytes, {row_count} rows — expect {expected_rows})")
+        print("Manually open this file to confirm the 6 monthly revenue values "
+              "match ground truth: 45,955,856 / 53,842,068 / 67,155,230 / "
+              "69,942,276 / 73,344,343 / 53,419,034 VND.")
+        results.append((test_id, question, answer, file_ok))
+
+    print_summary("REPORT", results)
+    return results
+
+
+# ---------------------------------------------------------
 # Summary printer
 # ---------------------------------------------------------
 def print_summary(group_name, results):
@@ -197,9 +257,11 @@ def main():
         run_anomaly_test(client)
     if group in ("all", "chart"):
         run_chart_tests(client)
+    if group in ("all", "report"):
+        run_report_tests(client)
 
-    if group not in ("all", "core", "anomaly", "chart"):
-        print(f"Unknown group '{group}'. Use: all | core | anomaly | chart")
+    if group not in ("all", "core", "anomaly", "chart", "report"):
+        print(f"Unknown group '{group}'. Use: all | core | anomaly | chart | report")
 
 
 if __name__ == "__main__":
